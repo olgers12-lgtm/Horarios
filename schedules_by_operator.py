@@ -1,5 +1,5 @@
-# Scheduler por operario y área - Incluye lista de operarios proporcionada
-# Ejecutar: streamlit run schedules_by_operator_with_staff.py
+# Scheduler por operario y área - Versión corregida (sin error de comillas)
+# Ejecutar: streamlit run schedules_by_operator.py
 # Requisitos: streamlit, pandas, numpy
 import streamlit as st
 import pandas as pd
@@ -13,7 +13,7 @@ st.markdown("""
 Se ha cargado la lista de operarios que proporcionaste. Puedes:
 - Revisar/editar la plantilla.
 - Ajustar turnos y requerimientos por área.
-- Generar un horario propuesto que respeta reglas (06:00–06:00, turnos definidos, max 6 días consecutivos).
+- Generar un horario propuesto que respeta reglas (06:00–06:00, turnos definidos, máximo 6 días consecutivos).
 """)
 
 # -----------------------------
@@ -83,7 +83,6 @@ ops_data = [
 
 # Create default DataFrame and let user edit or upload their own
 df_ops_default = pd.DataFrame(ops_data)
-# Add default contract_hours and availability (Mon-Sat by default; users who work Sunday can be edited)
 df_ops_default["contract_hours"] = 48
 df_ops_default["availability"] = "Mon,Tue,Wed,Thu,Fri,Sat"  # default day off = Sunday
 
@@ -97,9 +96,13 @@ if uploaded:
         st.error("Error leyendo CSV: " + str(e))
         df_ops = df_ops_default.copy()
 else:
-    # show editable table in main page so user can tweak if needed
     st.subheader("Plantilla de operarios (puedes editar en la tabla abajo)")
-    df_ops = st.data_editor(df_ops_default, num_rows="dynamic")
+    # Use data_editor where available, fallback to dataframe display if not
+    try:
+        df_ops = st.data_editor(df_ops_default, num_rows="dynamic")
+    except Exception:
+        df_ops = df_ops_default.copy()
+        st.dataframe(df_ops)
 
 # -----------------------------
 # Parámetros de planificación (sidebar)
@@ -124,9 +127,9 @@ selected_shift_ids = st.sidebar.multiselect("Selecciona turnos a usar", options=
 shifts = []
 for s in default_shifts:
     if s["id"] in selected_shift_ids:
-        hours = (s["end'] - s['start']) % 24 if False else None  # placeholder handled below
         start = s["start"]
         end = s["end"]
+        # compute hours properly even if crosses midnight
         hours = (end - start) % 24
         if hours == 0:
             hours = 24
@@ -134,7 +137,6 @@ for s in default_shifts:
 
 # Areas derived from plantilla + allow adding
 st.sidebar.header("Áreas (extra si necesitas)")
-# build unique area list from df_ops
 unique_areas = sorted(set(df_ops["areas"].fillna("").unique()))
 areas_text = st.sidebar.text_area("Lista de áreas (separadas por coma)", value=",".join(unique_areas))
 areas = [a.strip() for a in areas_text.split(",") if a.strip()]
