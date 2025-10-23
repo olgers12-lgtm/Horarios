@@ -1,39 +1,53 @@
-# Scheduler interactivo - Seguro y funcional (Ingeniero Senior)
-# Ejecutar: streamlit run schedules_by_operator_interactive_safe.py
-# Requisitos recomendados: streamlit, pandas, numpy, plotly (opcional), matplotlib (fallback)
-# - El script es robusto si faltan plotly/matplotlib (no crashea).
-# - Permite añadir temporales (TEMP_{AREA}_{n}), filtrar por área, editar la tabla, validar conflictos y mostrar Gantt.
+# Planificador pro (sin plotly/matplotlib) — Gantt HTML/CSS, validaciones y edición
+# Ejecutar: streamlit run schedules_by_operator_pro.py
+# Objetivo: versión "senior" que NO requiere plotly ni matplotlib.
+# - Gantt construida con HTML/CSS (responsive, interactiva en navegador).
+# - Validaciones automáticas (doble turno, exceso horas, días consecutivos).
+# - Añadir temporales, filtro por área, búsqueda, edición y export CSV/Excel.
+# - Documentado y modular para fácil extensión a ILP/optimización si se requiere.
 
 import streamlit as st
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
+import io
 
-st.set_page_config(page_title="Planificador interactivo - Seguro", layout="wide")
-st.title("Planificador interactivo — (robusto, con validaciones)")
+st.set_page_config(page_title="Planificador PRO — Gantt HTML/CSS (sin plotly)", layout="wide")
+st.title("Planificador PRO — Gantt en HTML/CSS (sin dependencias)")
 
-# --- Detectar librerías gráficas ---
-has_plotly = True
-try:
-    import plotly.express as px
-except Exception:
-    has_plotly = False
+# -------------------------
+# Helpers y configuración
+# -------------------------
+def iso_date(d):
+    return d.strftime("%Y-%m-%d")
 
-has_matplotlib = True
-if not has_plotly:
-    try:
-        import matplotlib.pyplot as plt
-    except Exception:
-        has_matplotlib = False
+def parse_avail(av_str):
+    if pd.isna(av_str) or str(av_str).strip()=="":
+        return set(["Mon","Tue","Wed","Thu","Fri","Sat"])
+    tokens = [t.strip() for t in str(av_str).replace(";",",").split(",") if t.strip()]
+    return set([tok[:3].title() for tok in tokens])
 
-if not has_plotly:
-    st.sidebar.warning("plotly no está instalado. La vista Gantt será menos interactiva. Para habilitar plotly: `pip install plotly`.")
-if not has_plotly and not has_matplotlib:
-    st.sidebar.error("Ni plotly ni matplotlib están disponibles. La app mostrará sólo tablas. Instala plotly o matplotlib.")
+def parse_areas(a_str):
+    if pd.isna(a_str) or str(a_str).strip()=="":
+        return []
+    return [x.strip() for x in str(a_str).replace(";",",").split(",") if x.strip()]
 
-# ---------------------------
-# Plantilla de operarios (lista provista por el usuario)
-# ---------------------------
+def hours_between(start_dt, end_dt):
+    return (end_dt - start_dt).total_seconds() / 3600.0
+
+def datetime_for_day_and_hour(day, hour):
+    return datetime.combine(day, datetime.min.time()) + timedelta(hours=hour)
+
+def df_to_excel_bytes(df):
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+        df.to_excel(writer, index=False, sheet_name="Asignaciones")
+        writer.save()
+    return output.getvalue()
+
+# -------------------------
+# Default operators list (user provided)
+# -------------------------
 ops_data = [
     {"name":"MORAGA MORENO ANA ISABEL", "areas":"ANTI-REFLEJO"},
     {"name":"CUBILLO GUTIERREZ JINNETTE LUCIA", "areas":"BISEL Y MONTAJE"},
@@ -96,12 +110,10 @@ ops_data = [
 ]
 df_ops_default = pd.DataFrame(ops_data)
 df_ops_default["contract_hours"] = 48
-df_ops_default["availability"] = "Mon,Tue,Wed,Thu,Fri,Sat"  # por defecto domingo libre
+df_ops_default["availability"] = "Mon,Tue,Wed,Thu,Fri,Sat"
 
-# Editable plantilla en sidebar (data editor si disponible)
-st.sidebar.markdown("Plantilla de operarios (edítala si necesitas cambiar disponibilidad o contract_hours).")
+st.sidebar.header("Plantilla de operarios")
 try:
-    # experimental_data_editor or data_editor depending on Streamlit version
     if hasattr(st.sidebar, "experimental_data_editor"):
         df_ops = st.sidebar.experimental_data_editor(df_ops_default, num_rows="dynamic")
     elif hasattr(st.sidebar, "data_editor"):
@@ -113,15 +125,16 @@ except Exception:
     df_ops = df_ops_default.copy()
     st.sidebar.dataframe(df_ops)
 
-# ---------------------------
-# Parámetros de planificación
-# ---------------------------
+# -------------------------
+# Plan params + shifts
+# -------------------------
 st.sidebar.header("Parámetros de planificación")
 start_date = st.sidebar.date_input("Fecha inicio", value=datetime(2025,12,1).date())
 num_days = st.sidebar.number_input("Número de días a planificar", min_value=1, max_value=31, value=14)
 days = [(start_date + timedelta(days=i)) for i in range(num_days)]
+date_range_start = datetime.combine(days[0], datetime.min.time()) + timedelta(hours=6)   # 06:00 day 1
+date_range_end = datetime.combine(days[-1], datetime.min.time()) + timedelta(days=1, hours=6)  # 06:00 after last day
 
-# Turnos por defecto (soportan cruce de medianoche)
 default_shifts = {
     "06-14": {"start":6, "end":14},
     "07-15": {"start":7, "end":15},
@@ -130,7 +143,6 @@ default_shifts = {
     "14-21": {"start":14, "end":21},
     "18-00": {"start":18, "end":0},
     "21-06": {"start":21, "end":6},
-    # especiales
     "AR_06-14": {"start":6, "end":14},
     "AR_14-22": {"start":14, "end":22},
     "AR_22-06": {"start":22, "end":6},
@@ -138,17 +150,14 @@ default_shifts = {
     "06-12": {"start":6, "end":12},
 }
 
-# Areas iniciales (tomadas de plantilla)
 unique_areas = sorted(set(df_ops["areas"].dropna().unique()))
-areas_text = st.sidebar.text_area("Áreas (edita / agrega si hace falta)", value=",".join(unique_areas))
+areas_text = st.sidebar.text_area("Áreas (editar/agregar)", value=",".join(unique_areas))
 areas = [a.strip() for a in areas_text.split(",") if a.strip()]
 
-# Requerimiento por área y turno
-st.sidebar.header("Requerimiento por área y turno")
+st.sidebar.header("Requerimientos por área/turno")
 req_matrix = {}
 for a in areas:
     st.sidebar.markdown(f"Área: {a}")
-    # por defecto sugerimos los turnos diurnos; usuario puede seleccionar otros
     suggested = ["06-14","07-15","08-16","09-17"]
     chosen = st.sidebar.multiselect(f"Turnos para {a}", options=list(default_shifts.keys()), default=suggested, key=f"sh_{a}")
     for sh in chosen:
@@ -156,50 +165,36 @@ for a in areas:
         req = st.sidebar.number_input(f"{a} - {sh}", min_value=0, max_value=20, value=1, key=key)
         req_matrix[(sh,a)] = int(req)
 
-# Añadir temporales interactivamente
-st.sidebar.header("Temporales - añadir")
+st.sidebar.header("Temporales")
 temp_surf = st.sidebar.number_input("Temporales SURF", min_value=0, max_value=50, value=2)
 temp_bodega = st.sidebar.number_input("Temporales BODEGA", min_value=0, max_value=50, value=1)
 temp_em = st.sidebar.number_input("Temporales E&M", min_value=0, max_value=50, value=1)
 temp_calidad = st.sidebar.number_input("Temporales CALIDAD", min_value=0, max_value=50, value=1)
-
 if st.sidebar.button("Añadir temporales"):
     def append_temps(df_ops_local, count, area):
         if count <= 0: return df_ops_local
-        rows = []
+        rows=[]
         base = len(df_ops_local)
         for i in range(int(count)):
-            rows.append({"name": f"TEMP_{area}_{base+i+1}", "areas": area, "contract_hours":48, "availability":"Mon,Tue,Wed,Thu,Fri,Sat,Sun"})
+            rows.append({"name":f"TEMP_{area}_{base+i+1}", "areas": area, "contract_hours":48, "availability":"Mon,Tue,Wed,Thu,Fri,Sat,Sun"})
         return pd.concat([df_ops_local, pd.DataFrame(rows)], ignore_index=True)
     df_ops = append_temps(df_ops, temp_surf, "SURF")
     df_ops = append_temps(df_ops, temp_bodega, "BODEGA")
     df_ops = append_temps(df_ops, temp_em, "E&M")
     df_ops = append_temps(df_ops, temp_calidad, "CALIDAD")
-    st.sidebar.success("Temporales añadidos. Pulsa 'Generar horario' para asignarlos.")
+    st.sidebar.success("Temporales añadidos. Pulsa Generar.")
 
-# Restricciones globales
-max_hours_per_day = st.sidebar.number_input("Horas máximas por día por operario", min_value=1, max_value=24, value=12)
-max_consec_days = st.sidebar.number_input("Máx. días consecutivos permitidos", min_value=1, max_value=7, value=6)
+# Constraints
+max_hours_per_day = st.sidebar.number_input("Horas máximas por día (por operario)", min_value=1, max_value=24, value=12)
+max_consec_days = st.sidebar.number_input("Máx. días consecutivos", min_value=1, max_value=7, value=6)
 
-# ---------------------------
-# Helpers: parse availability/areas
-# ---------------------------
-def parse_avail(av_str):
-    if pd.isna(av_str) or str(av_str).strip()=="":
-        return set(["Mon","Tue","Wed","Thu","Fri","Sat"])
-    tokens = [t.strip() for t in str(av_str).replace(";",",").split(",") if t.strip()]
-    return set([tok[:3].title() for tok in tokens])
-
-def parse_areas(a_str):
-    if pd.isna(a_str) or str(a_str).strip()=="":
-        return []
-    return [x.strip() for x in str(a_str).replace(";",",").split(",") if x.strip()]
-
-# Build ops internal list
+# -------------------------
+# Build internal ops list
+# -------------------------
 ops = []
 for _, row in df_ops.iterrows():
     name = row.get("name")
-    if pd.isna(name) or not str(name).strip(): 
+    if pd.isna(name) or not str(name).strip():
         continue
     ops.append({
         "name": name,
@@ -207,65 +202,48 @@ for _, row in df_ops.iterrows():
         "contract_hours": float(row.get("contract_hours",48)),
         "availability": parse_avail(row.get("availability","Mon,Tue,Wed,Thu,Fri,Sat")),
         "assigned_hours": 0.0,
-        "daily_hours": {},   # map date -> hours assigned that date
+        "daily_hours": {},
         "assigned_dates": set()
     })
 
-if len(ops) == 0:
-    st.warning("No hay operarios definidos. Carga la plantilla o pega CSV.")
-    st.stop()
+st.write(f"Operarios cargados: {len(ops)}")
 
-st.write(f"Operarios totales (incluye temporales si se añadieron): {len(ops)}")
-st.dataframe(pd.DataFrame([{"name":o["name"], "areas":",".join(o["areas"]), "contract_hours":o["contract_hours"]} for o in ops]))
-
-# ---------------------------
-# Asignación heurística (greedy) con reglas reales
-# ---------------------------
-st.header("Generar horario propuesto (interactivo y validado)")
+# -------------------------
+# Assignment (heuristic)
+# -------------------------
+st.header("Generar horario (propuesta)")
 if st.button("Generar horario"):
     schedule = []
-    # reset counters
+    # reset
     for o in ops:
         o["assigned_hours"]=0.0
         o["daily_hours"]={}
         o["assigned_dates"]=set()
-
-    # index por área
     ops_by_area = {}
     for a in areas:
         ops_by_area[a] = [o for o in ops if (a in o["areas"]) or (len(o["areas"])==0)]
-
-    # iterar días y requisitos
     for d in days:
         dow = d.strftime("%a")[:3]
         for (sh,a), needed in req_matrix.items():
-            if needed <= 0:
+            if needed <= 0: 
                 continue
-            # obtener definición del turno
-            sh_def = default_shifts.get(sh, {"start":6, "end":14})
+            sh_def = default_shifts.get(sh, {"start":6,"end":14})
             s_start = sh_def["start"]
             s_end = sh_def["end"]
             start_dt = datetime.combine(d, datetime.min.time()) + timedelta(hours=s_start)
             end_dt = datetime.combine(d, datetime.min.time()) + timedelta(hours=s_end)
             if s_end <= s_start:
                 end_dt += timedelta(days=1)
-            shift_hours = (end_dt - start_dt).total_seconds() / 3600.0
-
-            # completar plazas requeridas
+            shift_hours = hours_between(start_dt, end_dt)
             for slot in range(int(needed)):
-                candidates = []
+                candidates=[]
                 for o in ops_by_area.get(a, []):
-                    # disponibilidad por día
                     if dow not in o["availability"]:
                         continue
-                    # no asignar doble turno el mismo día
                     if d in o["assigned_dates"]:
                         continue
-                    # no superar horas diarias
-                    daily_h = o["daily_hours"].get(d, 0.0)
-                    if daily_h + shift_hours > max_hours_per_day:
+                    if o["daily_hours"].get(d,0)+shift_hours > max_hours_per_day:
                         continue
-                    # verificar dias consecutivos
                     consec = 0
                     for k in range(1, max_consec_days+1):
                         if (d - timedelta(days=k)) in o["assigned_dates"]:
@@ -274,60 +252,35 @@ if st.button("Generar horario"):
                             break
                     if consec >= max_consec_days:
                         continue
-                    # preferir asignaciones dentro de contract_hours (prioridad)
                     if o["assigned_hours"] + shift_hours <= o["contract_hours"]:
-                        candidates.append((0, o))
+                        candidates.append((0,o))
                     else:
-                        candidates.append((1, o))
+                        candidates.append((1,o))
                 if not candidates:
-                    # relajamos reglas si no hay candidatos: permitir asignación aunque supere contract_hours (pero evitar doble turno)
-                    relaxed = []
+                    # relax rules
                     for o in ops_by_area.get(a, []):
                         dow_ok = d.strftime("%a")[:3] in o["availability"]
                         if not dow_ok:
                             continue
                         if d in o["assigned_dates"]:
                             continue
-                        # allow if not exceeding daily max
-                        daily_h = o["daily_hours"].get(d, 0.0)
-                        if daily_h + shift_hours <= max_hours_per_day:
-                            relaxed.append((2, o))
-                    candidates = relaxed
-
+                        if o["daily_hours"].get(d,0)+shift_hours <= max_hours_per_day:
+                            candidates.append((2,o))
                 if not candidates:
-                    # sin candidatos posibles -> hueco
                     schedule.append({
-                        "Fecha": d,
-                        "Start": start_dt,
-                        "End": end_dt,
-                        "Área": a,
-                        "Turno": sh,
-                        "Operario": None,
-                        "Horas": shift_hours
+                        "Fecha": d, "Start": start_dt, "End": end_dt, "Área": a, "Turno": sh, "Operario": None, "Horas": shift_hours
                     })
                     continue
-
-                chosen = sorted(candidates, key=lambda x: (x[0], x[1]["assigned_hours"]))[0][1]
-                # asignar
+                chosen = sorted(candidates, key=lambda x:(x[0], x[1]["assigned_hours"]))[0][1]
                 chosen["assigned_hours"] += shift_hours
-                chosen["daily_hours"][d] = chosen["daily_hours"].get(d, 0.0) + shift_hours
+                chosen["daily_hours"][d] = chosen["daily_hours"].get(d,0)+shift_hours
                 chosen["assigned_dates"].add(d)
                 schedule.append({
-                    "Fecha": d,
-                    "Start": start_dt,
-                    "End": end_dt,
-                    "Área": a,
-                    "Turno": sh,
-                    "Operario": chosen["name"],
-                    "Horas": shift_hours
+                    "Fecha": d, "Start": start_dt, "End": end_dt, "Área": a, "Turno": sh, "Operario": chosen["name"], "Horas": shift_hours
                 })
-
     df_schedule = pd.DataFrame(schedule)
-
-    # Mostrar editable (si es posible)
-    st.subheader("Horario propuesto (editable)")
+    st.subheader("Horario propuesto (editable si tu Streamlit soporta data_editor)")
     try:
-        # experimental_data_editor / data_editor availability varies by streamlit version
         if hasattr(st, "experimental_data_editor"):
             edited = st.experimental_data_editor(df_schedule, num_rows="dynamic")
         elif hasattr(st, "data_editor"):
@@ -338,75 +291,59 @@ if st.button("Generar horario"):
     except Exception:
         edited = None
         st.dataframe(df_schedule)
-
     if edited is not None:
-        # use edited table as final schedule (but validate)
         df_schedule = edited.copy()
 
-    # ---------- VALIDACIONES ----------
-    def validate_schedule(df_sch, max_hours_day, max_consec):
-        issues = []
-        # check double shift same day and daily hours > limit and consec days per operator
-        by_op = {}
+    # Validations
+    def validate(df_sch):
+        issues=[]
+        by_op={}
         for idx, r in df_sch.iterrows():
             op = r.get("Operario")
             if pd.isna(op) or op is None:
                 continue
-            name = str(op)
+            name=str(op)
             fecha = pd.to_datetime(r["Fecha"]).date() if not pd.isna(r["Fecha"]) else None
-            hrs = float(r.get("Horas", 0))
-            by_op.setdefault(name, []).append((fecha, hrs, idx))
-        # checks
-        for name, entries in by_op.items():
-            # daily hours
-            daily = {}
-            dates = set()
-            for fecha, hrs, idx in entries:
-                daily[fecha] = daily.get(fecha, 0.0) + hrs
+            hrs = float(r.get("Horas",0))
+            by_op.setdefault(name, []).append((fecha, hrs))
+        for name, rows in by_op.items():
+            daily={}
+            dates=set()
+            for fecha, hrs in rows:
+                daily[fecha]=daily.get(fecha,0)+hrs
                 dates.add(fecha)
-            for d, hsum in daily.items():
-                if hsum > max_hours_day + 1e-6:
-                    issues.append({"type":"daily_hours", "operario":name, "fecha":d, "horas":hsum})
-            # double shift is implicit if multiple entries same fecha
-            for d in daily:
-                count = sum(1 for (f,_,_) in entries if f==d)
+            for d, total in daily.items():
+                if total > max_hours_per_day + 1e-9:
+                    issues.append(f"{name} tiene {total:.1f}h el día {d} (> {max_hours_per_day}h)")
+                count = sum(1 for (f,_) in rows if f==d)
                 if count > 1:
-                    issues.append({"type":"double_shift", "operario":name, "fecha":d, "count":count})
-            # consecutive days
+                    issues.append(f"{name} tiene {count} asignaciones el día {d} (posible doble turno)")
             date_list = sorted([d for d in dates if d is not None])
             if date_list:
-                consec = 1
-                for i in range(1, len(date_list)):
-                    if (date_list[i] - date_list[i-1]).days == 1:
-                        consec += 1
-                        if consec > max_consec:
-                            issues.append({"type":"consec_days", "operario":name, "hasta_fecha":date_list[i], "consec":consec})
+                consec=1
+                for i in range(1,len(date_list)):
+                    if (date_list[i]-date_list[i-1]).days==1:
+                        consec+=1
+                        if consec>max_consec_days:
+                            issues.append(f"{name} excede {max_consec_days} días consecutivos hasta {date_list[i]}")
                     else:
-                        consec = 1
+                        consec=1
         return issues
 
-    issues = validate_schedule(df_schedule, max_hours_per_day, max_consec_days)
-
+    issues = validate(df_schedule)
     if issues:
-        st.error("Se detectaron conflictos/validaciones en el horario. Revisa la lista abajo y corrige en la tabla (o ajusta parámetros).")
+        st.error("Conflictos detectados:")
         for it in issues:
-            if it["type"] == "daily_hours":
-                st.warning(f"Operario {it['operario']} tiene {it['horas']:.1f} h el día {it['fecha']} (máx {max_hours_per_day})")
-            elif it["type"] == "double_shift":
-                st.warning(f"Operario {it['operario']} tiene {it['count']} asignaciones el día {it['fecha']} (posible doble turno).")
-            elif it["type"] == "consec_days":
-                st.warning(f"Operario {it['operario']} excede días consecutivos ({it['consec']}) hasta {it['hasta_fecha']}.")
+            st.warning(it)
     else:
-        st.success("Horario validado: no se detectaron conflictos críticos.")
+        st.success("Horario validado: sin conflictos detectados.")
 
-    # ----------------------------
-    # Vista filtrada y Gantt
-    # ----------------------------
-    st.sidebar.header("Filtrar vista")
+    # Filters & search
+    st.sidebar.header("Vista / filtros")
     if not df_schedule.empty:
         areas_available = sorted(df_schedule["Área"].dropna().unique())
-        filter_areas = st.sidebar.multiselect("Mostrar áreas", options=areas_available, default=areas_available)
-        search_text = st.sidebar.text_input("Buscar texto (p.ej. TEMP o nombre)", value="")
+        filter_areas = st.sidebar.multiselect("Áreas a mostrar", options=areas_available, default=areas_available)
+        search_text = st.sidebar.text_input("Buscar (p. ej. TEMP)", value="")
         df_view = df_schedule[df_schedule["Área"].isin(filter_areas)].copy()
         if search_text.strip():
             mask = df_view["Operario"].fillna("").str.contains(search_text, case=False, na=False) | df_view["Área"].str.contains(search_text, case=False, na=False)
@@ -414,47 +351,72 @@ if st.button("Generar horario"):
         st.subheader("Vista filtrada")
         st.dataframe(df_view.sort_values(["Fecha","Start"]))
 
-        # Gantt / timeline
-        if not df_view.empty:
-            if has_plotly:
-                # ensure datetime dtypes
-                df_view["Start"] = pd.to_datetime(df_view["Start"])
-                df_view["End"] = pd.to_datetime(df_view["End"])
-                fig = px.timeline(df_view, x_start="Start", x_end="End", y="Área", color="Operario", hover_data=["Turno","Horas"])
-                fig.update_yaxes(autorange="reversed")
-                fig.update_layout(height=600, title="Gantt / Timeline (plotly)")
-                st.plotly_chart(fig, use_container_width=True)
-            elif has_matplotlib:
-                import matplotlib.pyplot as plt
-                st.subheader("Gantt (matplotlib fallback)")
-                df_plot = df_view.copy()
-                df_plot["Start_num"] = pd.to_datetime(df_plot["Start"]).astype('int64')//10**9
-                df_plot["End_num"] = pd.to_datetime(df_plot["End"]).astype('int64')//10**9
-                areas_plot = list(df_plot["Área"].unique())
-                y_pos = {a:i for i,a in enumerate(areas_plot)}
-                fig, ax = plt.subplots(figsize=(12, max(4, len(areas_plot)*0.4)))
-                for _, row in df_plot.iterrows():
-                    ax.barh(y_pos[row["Área"]], (row["End_num"]-row["Start_num"])/3600.0, left=pd.to_datetime(row["Start"]), height=0.4)
-                ax.set_yticks(list(y_pos.values()))
-                ax.set_yticklabels(list(y_pos.keys()))
-                ax.set_xlabel("Fecha / Hora")
-                fig.autofmt_xdate()
-                st.pyplot(fig)
-            else:
-                st.info("No hay librería gráfica instalada; se muestra sólo la tabla.")
-    else:
-        st.info("No hay asignaciones para mostrar.")
+        # Gantt HTML/CSS build (no dependencies)
+        st.subheader("Gantt (HTML/CSS, interactivo en navegador)")
+        # Prepare timeline scale (hours) from date_range_start to date_range_end in hours
+        total_hours = int((date_range_end - date_range_start).total_seconds() / 3600)
+        # Build columns for each day label
+        # Group by area, then build row bars
+        areas_order = sorted(df_view["Área"].unique())
+        # CSS
+        gantt_css = f"""
+        <style>
+        .gantt-wrap {{ width:100%; overflow-x:auto; border:1px solid #ddd; padding:8px; background:#fff; }}
+        .gantt-row {{ display:flex; align-items:center; gap:8px; margin-bottom:6px; }}
+        .gantt-area {{ width:200px; flex:0 0 200px; font-weight:600; }}
+        .gantt-bar-area {{ position:relative; height:36px; flex:1 1 auto; background:#f6f6f6; border-radius:4px; border:1px solid #eee; }}
+        .gantt-item {{ position:absolute; height:28px; top:4px; border-radius:4px; padding:2px 6px; color:#fff; font-size:12px; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; box-shadow: 0 1px 2px rgba(0,0,0,0.1);}}
+        .gantt-legend {{ display:flex; gap:8px; flex-wrap:wrap; margin-bottom:8px; }}
+        .gantt-legend div {{ padding:4px 8px; border-radius:4px; background:#efefef; font-size:12px; }}
+        </style>
+        """
+        # Colors map per operator (hash)
+        def color_for(text):
+            h = abs(hash(text)) % 360
+            return f"hsl({h},65%,40%)"
+        # Build HTML
+        html = gantt_css + "<div class='gantt-wrap'>"
+        # legend
+        unique_ops = df_view["Operario"].dropna().unique().tolist()
+        if unique_ops:
+            html += "<div class='gantt-legend'><div><b>Legend</b></div>"
+            for op in unique_ops[:30]:
+                col = color_for(op)
+                html += f"<div style='background:{col};color:white'>{op}</div>"
+            html += "</div>"
+        # rows
+        for a in areas_order:
+            html += "<div class='gantt-row'>"
+            html += f"<div class='gantt-area'>{a}</div>"
+            html += "<div class='gantt-bar-area'>"
+            rows_a = df_view[df_view["Área"]==a]
+            for _, r in rows_a.iterrows():
+                s = pd.to_datetime(r["Start"])
+                e = pd.to_datetime(r["End"])
+                # clamp to date_range
+                if e <= date_range_start or s >= date_range_end:
+                    continue
+                s2 = max(s, date_range_start)
+                e2 = min(e, date_range_end)
+                left_hours = (s2 - date_range_start).total_seconds()/3600.0
+                width_hours = (e2 - s2).total_seconds()/3600.0
+                left_pct = 100.0 * left_hours / total_hours
+                width_pct = max(0.5, 100.0 * width_hours / total_hours)  # min width for visibility
+                op = r.get("Operario") or "VACANTE"
+                col = color_for(str(op))
+                title = f"{op} | {r.get('Turno')} | {s.strftime('%d-%b %H:%M')} → {e.strftime('%d-%b %H:%M')} | {r.get('Horas')}h"
+                html += f"<div class='gantt-item' title='{title}' style='left:{left_pct}%; width:{width_pct}%; background:{col};'>{op}</div>"
+            html += "</div></div>"
+        html += "</div>"
+        st.markdown(html, unsafe_allow_html=True)
 
-    # ----------------------------
-    # Descarga CSV
-    # ----------------------------
-    if not df_schedule.empty:
+        # Downloads
         csv = df_schedule.to_csv(index=False).encode("utf-8")
-        st.download_button("Descargar asignaciones (CSV)", data=csv, file_name="horario_propuesto.csv", mime="text/csv")
+        excel_bytes = df_to_excel_bytes(df_schedule)
+        st.download_button("Descargar CSV", data=csv, file_name="horario_propuesto.csv", mime="text/csv")
+        st.download_button("Descargar Excel", data=excel_bytes, file_name="horario_propuesto.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    else:
+        st.info("No hay asignaciones generadas para mostrar.")
 
 else:
-    st.info("Configura parámetros (temporales / requerimientos) y pulsa 'Generar horario' para obtener la propuesta interactiva.")
-
-# ---------------------------
-# Fin del archivo
-# ---------------------------
+    st.info("Ajusta parámetros y pulsa 'Generar horario' para crear la propuesta.")
