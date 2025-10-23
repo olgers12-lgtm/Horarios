@@ -1,67 +1,64 @@
-# Reemplaza/usa estas funciones en tu app Streamlit para evitar errores cuando xlsxwriter no está instalado.
-# Uso: importa df_to_excel_bytes y usa el bloque de descarga seguro mostrado abajo.
-
-import io
-import pandas as pd
+# Debug wrapper para Streamlit — muestra errores/estado del entorno cuando la app queda en blanco.
+# Coloca este archivo en el mismo directorio que tu schedules_by_operator.py y ejecuta:
+# streamlit run schedules_debug_wrapper.py
 import streamlit as st
+import sys, os, traceback, importlib.util, importlib.machinery
 
-def df_to_excel_bytes(df: pd.DataFrame) -> bytes | None:
-    """
-    Intenta escribir df a XLSX en memoria usando primero xlsxwriter, luego openpyxl.
-    Si ambos fallan (paquetes no instalados), devuelve None.
-    """
-    output = io.BytesIO()
+st.set_page_config(page_title="DEBUG: wrapper schedules_by_operator", layout="wide")
+st.title("DEBUG: wrapper — Mostrar errores y estado del entorno")
 
-    # Intento 1: xlsxwriter (generalmente más rápido y fiable para formatos)
+st.markdown("Esta página captura errores al importar/ejecutar tu app principal (schedules_by_operator.py) y muestra información útil para depuración.")
+
+# 1) Mostrar info básica de entorno
+st.subheader("Info del entorno")
+st.write("Python:", sys.version.replace("\n", " "))
+st.write("Working dir:", os.getcwd())
+st.write("Archivo app esperado:", os.path.join(os.getcwd(), "schedules_by_operator.py"))
+st.write("Streamlit argv:", sys.argv)
+
+# 2) Chequeo rápido de paquetes relevantes
+st.subheader("Disponibilidad de paquetes clave")
+import importlib.util
+packages = ["streamlit","pandas","numpy","plotly","matplotlib","xlsxwriter","openpyxl"]
+pkg_status = {}
+for p in packages:
+    spec = importlib.util.find_spec(p)
+    pkg_status[p] = "INSTALLED" if spec is not None else "missing"
+st.table(pd.DataFrame(list(pkg_status.items()), columns=["package","status"]))
+
+# 3) Intentar importar (ejecutar) tu app principal de forma segura
+st.subheader("Intentando importar y ejecutar schedules_by_operator.py")
+app_path = os.path.join(os.getcwd(), "schedules_by_operator.py")
+if not os.path.exists(app_path):
+    st.error(f"No se encontró schedules_by_operator.py en: {app_path}")
+    st.stop()
+
+try:
+    # Import module from file path without caching previous imports
+    spec = importlib.util.spec_from_file_location("schedules_by_operator_for_debug", app_path)
+    module = importlib.util.module_from_spec(spec)
+    # Ejecutar el módulo (esto ejecutará top-level code de tu app)
+    loader = spec.loader
+    assert loader is not None
+    loader.exec_module(module)
+    st.success("La importación/ejecución de schedules_by_operator.py finalizó sin lanzar excepciones visibles.")
+    st.info("Si la pantalla principal sigue en blanco en tu app original, revisa la forma en que Streamlit muestra tu UI (posibles condiciones de flujo que no renderizan nada).")
+except Exception as e:
+    st.error("Se ha producido una excepción al importar/ejecutar schedules_by_operator.py")
+    st.exception(e)
+    # Mostrar traceback completo en texto
+    tb = traceback.format_exc()
+    st.text_area("Traceback completo", tb, height=400)
+
+    # Extra: mostrar contenido de las primeras 120 líneas del archivo para revisión rápida
     try:
-        with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
-            df.to_excel(writer, index=False, sheet_name="Asignaciones")
-            # writer.save() no es necesario dentro del context manager en pandas >= 1.2
-        return output.getvalue()
-    except Exception as e_xlsxwriter:
-        # No panic: intentamos openpyxl
-        # (podría ser ImportError por no instalado, u otro error)
-        # limpiar buffer
-        output.seek(0)
-        output.truncate(0)
+        with open(app_path, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+        preview = "".join(lines[:120])
+        st.subheader("Preview (primeras 120 líneas) de schedules_by_operator.py")
+        st.code(preview, language="python")
+    except Exception as ex2:
+        st.write("No se pudo leer el archivo para mostrar preview:", ex2)
 
-    # Intento 2: openpyxl
-    try:
-        with pd.ExcelWriter(output, engine="openpyxl") as writer:
-            df.to_excel(writer, index=False, sheet_name="Asignaciones")
-        return output.getvalue()
-    except Exception as e_openpyxl:
-        # Ningún motor disponible -> devolvemos None, el caller debe hacer fallback a CSV
-        return None
-
-# Ejemplo de uso seguro en tu app Streamlit (reemplaza tu bloque de descarga por esto):
-def download_schedule_safe(df_schedule: pd.DataFrame, label_prefix: str = "horario_propuesto"):
-    """
-    Botón(s) de descarga que no rompen la app si faltan paquetes Excel.
-    - Intenta Excel (xlsx) con df_to_excel_bytes
-    - Si no disponible, muestra aviso y ofrece CSV
-    """
-    # Primero CSV (siempre disponible)
-    csv_bytes = df_schedule.to_csv(index=False).encode("utf-8")
-    st.download_button(
-        label=f"Descargar {label_prefix}.csv",
-        data=csv_bytes,
-        file_name=f"{label_prefix}.csv",
-        mime="text/csv",
-    )
-
-    # Intentar Excel
-    excel_bytes = df_to_excel_bytes(df_schedule)
-    if excel_bytes is not None:
-        st.download_button(
-            label=f"Descargar {label_prefix}.xlsx",
-            data=excel_bytes,
-            file_name=f"{label_prefix}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        )
-    else:
-        st.warning(
-            "No hay motor Excel instalado en este entorno (xlsxwriter/openpyxl). "
-            "Si deseas descargar .xlsx instala 'xlsxwriter' o 'openpyxl'.\n"
-            "Comando: pip install xlsxwriter openpyxl"
-        )
+st.markdown("---")
+st.info("Después de lanzar este wrapper, copia aquí el traceback que aparece (si lo hubiera). Yo lo reviso y te doy la solución exacta (parche o cambio de código).")
