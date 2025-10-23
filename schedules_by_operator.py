@@ -1,8 +1,6 @@
-# Planificador PRO — versión completa y robusta
-# - No depende de plotly ni matplotlib para Gantt (usa HTML/CSS).
-# - Exportación: CSV siempre disponible; XLSX si xlsxwriter/openpyxl están instalados.
-# - Validaciones automáticas: doble turno, exceso de horas diarias, días consecutivos.
-# - Permite añadir temporales (TEMP_{AREA}_{n}), filtrar por área, buscar, editar y descargar.
+# Planificador PRO — versión corregida (fix validate_schedule bug)
+# - Corrección en la función de validación para evitar unpacking/ValueError.
+# - El resto del archivo mantiene la lógica previa (heurístico, Gantt HTML/CSS, export CSV/XLSX fallback).
 # Ejecutar: streamlit run schedules_by_operator.py
 
 import streamlit as st
@@ -15,8 +13,8 @@ import sys
 import importlib.util
 import traceback
 
-st.set_page_config(page_title="Planificador PRO — Gantt HTML/CSS", layout="wide")
-st.title("Planificador PRO — Gantt HTML/CSS (robusto)")
+st.set_page_config(page_title="Planificador PRO — Gantt HTML/CSS (fix)", layout="wide")
+st.title("Planificador PRO — Gantt HTML/CSS (corrección)")
 
 # -------------------------
 # Utilidades
@@ -353,7 +351,7 @@ if st.button("Generar horario"):
                     # relax rules: allow if available and not double assigned today and not exceed daily max
                     for o in ops_by_area.get(a, []):
                         dow_ok = d.strftime("%a")[:3] in o["availability"]
-                        if not dow_ok: 
+                        if not dow_ok:
                             continue
                         if d in o["assigned_dates"]:
                             continue
@@ -403,19 +401,24 @@ if st.button("Generar horario"):
             hrs = float(r.get("Horas", 0))
             by_op.setdefault(name, []).append((fecha, hrs))
         for name, entries in by_op.items():
+            # entries: list of (fecha, hrs)
             daily = {}
-            dates = set()
+            dates = []
             for fecha, hrs in entries:
                 daily[fecha] = daily.get(fecha, 0.0) + hrs
-                dates.add(fecha)
+                if fecha is not None:
+                    dates.append(fecha)
+            # check daily hours
             for d, hsum in daily.items():
                 if hsum > max_hours_day + 1e-6:
                     issues.append({"type":"daily_hours", "operario":name, "fecha":d, "horas":hsum})
-            for d in daily:
-                count = sum(1 for (f,_,) in [(f,h,0) for (f,h) in entries] if f == d)
+            # check double shifts (more than one assignment same date)
+            for d in daily.keys():
+                count = sum(1 for (f,_) in entries if f == d)
                 if count > 1:
                     issues.append({"type":"double_shift", "operario":name, "fecha":d, "count":count})
-            date_list = sorted([d for d in dates if d is not None])
+            # consecutive days
+            date_list = sorted(set(dates))
             if date_list:
                 consec = 1
                 for i in range(1, len(date_list)):
